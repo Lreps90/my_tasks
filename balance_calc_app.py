@@ -13,24 +13,32 @@ from matplotlib.ticker import FuncFormatter
 
 
 # ============================================================
-# Scrollable frame (Canvas + vertical scrollbar) ✅ FIXED
-# - Fixed viewport height so content can overflow and scroll
-# - Scroll wheel bound locally (no bind_all / no global unbind)
+# Scrollable frame (Canvas + vertical scrollbar) ✅ RELIABLE
+# - Fixed viewport so content can overflow and scroll
+# - No bind_all; wheel scroll is local to the canvas
 # ============================================================
 class ScrollableFrame(ttk.Frame):
     """
     A ttk.Frame with a vertical scrollbar and a fixed viewport.
     Put widgets into `.inner`.
     """
-    def __init__(self, master, *, width: int = 420, height: int = 650, **kwargs):
+    def __init__(self, master, *, width: int = 430, height: int = 680, **kwargs):
         super().__init__(master, **kwargs)
 
-        self.canvas = tk.Canvas(self, highlightthickness=0, width=width, height=height)
+        # Hard constrain THIS frame's size
+        self.configure(width=width, height=height)
+        self.grid_propagate(False)
+        self.pack_propagate(False)
+
+        self.canvas = tk.Canvas(self, highlightthickness=0)
         self.v_scroll = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
         self.canvas.configure(yscrollcommand=self.v_scroll.set)
 
-        self.canvas.pack(side="left", fill="both", expand=True)
-        self.v_scroll.pack(side="right", fill="y")
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        self.v_scroll.grid(row=0, column=1, sticky="ns")
+
+        self.rowconfigure(0, weight=1)
+        self.columnconfigure(0, weight=1)
 
         self.inner = ttk.Frame(self.canvas)
         self._window_id = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
@@ -38,24 +46,25 @@ class ScrollableFrame(ttk.Frame):
         self.inner.bind("<Configure>", self._on_inner_configure)
         self.canvas.bind("<Configure>", self._on_canvas_configure)
 
-        # Local mousewheel scrolling (only when pointer is over the canvas)
         self.canvas.bind("<Enter>", self._bind_wheel_local)
         self.canvas.bind("<Leave>", self._unbind_wheel_local)
 
-    def _on_inner_configure(self, _event=None):
+        self.after_idle(self._refresh_scrollregion)
+
+    def _refresh_scrollregion(self):
         self.canvas.update_idletasks()
         bbox = self.canvas.bbox("all")
         if bbox:
             self.canvas.configure(scrollregion=bbox)
 
+    def _on_inner_configure(self, _event=None):
+        self._refresh_scrollregion()
+
     def _on_canvas_configure(self, event):
-        # Keep inner frame width synced to visible viewport width
         self.canvas.itemconfigure(self._window_id, width=event.width)
 
     def _bind_wheel_local(self, _event=None):
-        # Windows / macOS
         self.canvas.bind("<MouseWheel>", self._on_mousewheel)
-        # Linux
         self.canvas.bind("<Button-4>", self._on_mousewheel_linux)
         self.canvas.bind("<Button-5>", self._on_mousewheel_linux)
 
@@ -65,7 +74,6 @@ class ScrollableFrame(ttk.Frame):
         self.canvas.unbind("<Button-5>")
 
     def _on_mousewheel(self, event):
-        # event.delta is typically ±120 on Windows
         self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
     def _on_mousewheel_linux(self, event):
@@ -118,7 +126,6 @@ def parse_rate(entry: ttk.Entry, field_name: str) -> float:
     if v < 0:
         raise ValueError(f"{field_name} cannot be negative.")
 
-    # If user typed "8" assume 8%
     if v > 1.0:
         return v / 100.0
     return v
@@ -156,13 +163,11 @@ def parse_dob(entry: ttk.Entry, field_name: str) -> date:
     if not s:
         raise ValueError(f"{field_name} is required.")
 
-    # ISO
     try:
         return datetime.strptime(s, "%Y-%m-%d").date()
     except ValueError:
         pass
 
-    # UK month name
     for fmt in ("%d %B %Y", "%d %b %Y"):
         try:
             return datetime.strptime(s, fmt).date()
@@ -303,9 +308,9 @@ def monte_carlo_paths_lognormal_monthly(
     return paths
 
 
-# =============================
-# Monte Carlo window (LEFT is scrollable ✅)
-# =============================
+# ============================================================
+# Monte Carlo window (LEFT panel scrollable)
+# ============================================================
 class MonteCarloWindow(tk.Toplevel):
     def __init__(self, master, params: dict):
         super().__init__(master)
@@ -313,19 +318,20 @@ class MonteCarloWindow(tk.Toplevel):
         self.geometry("1180x690")
         self.minsize(1180, 690)
 
-        self.params = params
-
         container = ttk.Frame(self, padding=12)
-        container.pack(fill="both", expand=True)
+        container.grid(row=0, column=0, sticky="nsew")
+        self.rowconfigure(0, weight=1)
+        self.columnconfigure(0, weight=1)
+        container.rowconfigure(0, weight=1)
+        container.columnconfigure(0, weight=0)
+        container.columnconfigure(1, weight=1)
 
-        # LEFT: scrollable parameters column
-        left_scroll = ScrollableFrame(container, width=420, height=650)
-        left_scroll.pack(side="left", fill="y")
+        left_scroll = ScrollableFrame(container, width=440, height=660)
+        left_scroll.grid(row=0, column=0, sticky="ns")
         left = left_scroll.inner
 
-        # RIGHT: chart
         right = ttk.Frame(container)
-        right.pack(side="left", fill="both", expand=True, padx=(12, 0))
+        right.grid(row=0, column=1, sticky="nsew", padx=(12, 0))
 
         # ---- Controls ----
         ctrl = ttk.LabelFrame(left, text="Simulation controls", padding=10)
@@ -334,10 +340,7 @@ class MonteCarloWindow(tk.Toplevel):
         self.use_retirement = tk.BooleanVar(value=params["use_retirement"])
         ttk.Label(ctrl, text="Horizon mode:").grid(row=0, column=0, sticky="w")
         ttk.Checkbutton(
-            ctrl,
-            text="Use retirement horizon",
-            variable=self.use_retirement,
-            command=self._toggle_horizon_mode
+            ctrl, text="Use retirement horizon", variable=self.use_retirement, command=self._toggle_horizon_mode
         ).grid(row=0, column=1, sticky="e")
 
         ttk.Label(ctrl, text="Date of birth:").grid(row=1, column=0, sticky="w", pady=(6, 0))
@@ -362,21 +365,14 @@ class MonteCarloWindow(tk.Toplevel):
         self.extra_months_entry.grid(row=5, column=1, sticky="e")
         self.extra_months_entry.insert(0, str(params["extra_months"]))
 
-        ttk.Label(ctrl, text="Start date (YYYY-MM-DD):").grid(row=6, column=0, sticky="w")
-        self.start_entry = ttk.Entry(ctrl, width=18)
-        self.start_entry.grid(row=6, column=1, sticky="e")
-        self.start_entry.insert(0, params["start_str"])
-
-        ttk.Separator(ctrl, orient="horizontal").grid(row=7, column=0, columnspan=2, sticky="ew", pady=10)
-
-        ttk.Label(ctrl, text="Simulations:").grid(row=8, column=0, sticky="w")
+        ttk.Label(ctrl, text="Simulations:").grid(row=6, column=0, sticky="w", pady=(10, 0))
         self.n_sims = ttk.Entry(ctrl, width=18)
-        self.n_sims.grid(row=8, column=1, sticky="e")
+        self.n_sims.grid(row=6, column=1, sticky="e", pady=(10, 0))
         self.n_sims.insert(0, "500")
 
-        ttk.Label(ctrl, text="Seed (optional):").grid(row=9, column=0, sticky="w")
+        ttk.Label(ctrl, text="Seed (optional):").grid(row=7, column=0, sticky="w")
         self.seed_entry = ttk.Entry(ctrl, width=18)
-        self.seed_entry.grid(row=9, column=1, sticky="e")
+        self.seed_entry.grid(row=7, column=1, sticky="e")
         self.seed_entry.insert(0, "")
 
         # ---- Include accounts ----
@@ -391,7 +387,7 @@ class MonteCarloWindow(tk.Toplevel):
         ttk.Checkbutton(inc, text="Include Cash ISA", variable=self.cisa_on).pack(anchor="w")
         ttk.Checkbutton(inc, text="Include Cash (non-ISA)", variable=self.cash_on).pack(anchor="w")
 
-        # ---- Stocks & Shares ISA ----
+        # ---- S&S ISA ----
         ssisa = ttk.LabelFrame(left, text="Stocks & Shares ISA (stochastic)", padding=10)
         ssisa.pack(fill="x", pady=(10, 0))
 
@@ -423,7 +419,7 @@ class MonteCarloWindow(tk.Toplevel):
         btns.pack(fill="x", pady=(10, 0))
         ttk.Button(btns, text="Run Monte Carlo", command=self.run).pack(side="left")
 
-        # ---- Outputs ----
+        # Outputs
         out = ttk.LabelFrame(left, text="End value summary (Total pot)", padding=10)
         out.pack(fill="x", pady=(10, 0))
 
@@ -463,14 +459,14 @@ class MonteCarloWindow(tk.Toplevel):
 
     def _toggle_horizon_mode(self):
         state_manual = "disabled" if self.use_retirement.get() else "normal"
-        for w in (self.years_entry, self.extra_months_entry, self.start_entry):
+        for w in (self.years_entry, self.extra_months_entry):
             w.configure(state=state_manual)
 
         state_ret = "normal" if self.use_retirement.get() else "disabled"
         for w in (self.dob_entry, self.ret_age_entry):
             w.configure(state=state_ret)
 
-    def _compute_months(self) -> tuple[int, date]:
+    def _compute_months(self) -> int:
         if self.use_retirement.get():
             dob = parse_dob(self.dob_entry, "Date of birth")
             ret_age = parse_int(self.ret_age_entry, "Retirement age")
@@ -479,19 +475,18 @@ class MonteCarloWindow(tk.Toplevel):
             m = months_between(start, retirement_date)
             if m <= 0:
                 raise ValueError("Retirement date is this month or in the past.")
-            return m, start
+            return m
 
         years = int(self.years_entry.get().strip())
         extra_m = int(self.extra_months_entry.get().strip())
-        start = parse_date_iso(self.start_entry, "Start date")
         m = years * 12 + extra_m
         if m <= 0:
             raise ValueError("Horizon must be at least 1 month.")
-        return m, start
+        return m
 
     def run(self):
         try:
-            months, _start_date = self._compute_months()
+            months = self._compute_months()
 
             n_sims = int(self.n_sims.get().strip())
             if n_sims <= 0:
@@ -578,7 +573,7 @@ class MonteCarloWindow(tk.Toplevel):
 
 
 # =============================
-# Main deterministic app
+# Main deterministic app ✅ LEFT PANEL NOW SCROLLABLE
 # =============================
 class GrowthApp(tk.Tk):
     def __init__(self):
@@ -595,14 +590,24 @@ class GrowthApp(tk.Tk):
             except tk.TclError:
                 pass
 
+        # Use GRID so left can be constrained and scroll
         main = ttk.Frame(self, padding=14)
-        main.pack(fill="both", expand=True)
+        main.grid(row=0, column=0, sticky="nsew")
+        self.rowconfigure(0, weight=1)
+        self.columnconfigure(0, weight=1)
 
-        left = ttk.Frame(main)
-        left.pack(side="left", fill="y")
+        main.rowconfigure(0, weight=1)
+        main.columnconfigure(0, weight=0)  # left fixed
+        main.columnconfigure(1, weight=1)  # right expands
 
+        # LEFT: scrollable parameters + outputs
+        left_scroll = ScrollableFrame(main, width=470, height=700)
+        left_scroll.grid(row=0, column=0, sticky="ns")
+        left = left_scroll.inner
+
+        # RIGHT: chart
         right = ttk.Frame(main)
-        right.pack(side="left", fill="both", expand=True, padx=(14, 0))
+        right.grid(row=0, column=1, sticky="nsew", padx=(14, 0))
 
         # Retirement settings
         retirement = ttk.LabelFrame(left, text="Retirement settings (optional)", padding=12)
@@ -677,14 +682,14 @@ class GrowthApp(tk.Tk):
         self.cash_monthly_entry = self._row(cash, 2, "Monthly cash add (£):", "0")
         self.cash_rate_entry = self._row(cash, 3, "Cash annual rate (e.g. 4.5%):", "4.5%")
 
-        # Buttons
+        # Buttons (inside scroll area)
         btns = ttk.Frame(left)
         btns.pack(fill="x", pady=(10, 0))
         ttk.Button(btns, text="Calculate", command=self.on_calculate).pack(side="left")
         ttk.Button(btns, text="Reset", command=self.on_reset).pack(side="left", padx=8)
         ttk.Button(btns, text="Monte Carlo…", command=self.open_monte_carlo).pack(side="left", padx=8)
 
-        # Results
+        # Results (inside scroll area)
         outputs = ttk.LabelFrame(left, text="End of horizon", padding=12)
         outputs.pack(fill="x", pady=(10, 0))
 
@@ -726,7 +731,7 @@ class GrowthApp(tk.Tk):
         self._out_row(outputs, 13, "Cash (non-ISA) invested:", self.cash_inv_var)
         self._out_row(outputs, 14, "Cash (non-ISA) growth:", self.cash_growth_var)
 
-        # Chart
+        # RIGHT: Chart
         chart_box = ttk.LabelFrame(right, text="Deterministic projection (daily compounding)", padding=10)
         chart_box.pack(fill="both", expand=True)
 
@@ -757,6 +762,7 @@ class GrowthApp(tk.Tk):
         self._toggle_cisa()
         self._toggle_cash()
 
+    # ---------- UI helpers ----------
     def _row(self, parent, r, label, default):
         ttk.Label(parent, text=label).grid(row=r, column=0, sticky="w", pady=4)
         e = ttk.Entry(parent, width=24)
@@ -768,6 +774,7 @@ class GrowthApp(tk.Tk):
         ttk.Label(parent, text=label).grid(row=r, column=0, sticky="w", pady=4)
         ttk.Label(parent, textvariable=var, font=("Segoe UI", 10, "bold")).grid(row=r, column=1, sticky="e", pady=4)
 
+    # ---------- Toggles ----------
     def _toggle_retirement_mode(self):
         manual_state = "disabled" if self.use_retirement.get() else "normal"
         for w in (self.years_entry, self.months_entry, self.start_entry):
@@ -801,6 +808,7 @@ class GrowthApp(tk.Tk):
         for w in (self.cash_initial_entry, self.cash_monthly_entry, self.cash_rate_entry):
             w.configure(state=state)
 
+    # ---------- Horizon ----------
     def _get_horizon(self) -> tuple[int, date, list[str]]:
         if self.use_retirement.get():
             dob = parse_dob(self.dob_entry, "Date of birth")
@@ -827,6 +835,7 @@ class GrowthApp(tk.Tk):
         labels = make_month_labels(total_months, start)
         return total_months, start, labels
 
+    # ---------- Plot ----------
     def _plot(
         self,
         *,
@@ -873,11 +882,11 @@ class GrowthApp(tk.Tk):
         self.fig.tight_layout()
         self.canvas.draw()
 
+    # ---------- Actions ----------
     def on_calculate(self):
         try:
             total_months, start, labels = self._get_horizon()
 
-            # S&S ISA
             ssisa_on = self.ssisa_enabled.get()
             if ssisa_on:
                 ssisa_initial = parse_float_money(self.ssisa_initial_entry, "S&S ISA initial balance")
@@ -896,7 +905,6 @@ class GrowthApp(tk.Tk):
                 ssisa_with = [0.0] * len(labels)
                 ssisa_inv = [0.0] * len(labels)
 
-            # Cash ISA
             cisa_on = self.cisa_enabled.get()
             if cisa_on:
                 cisa_initial = parse_float_money(self.cisa_initial_entry, "Cash ISA initial balance")
@@ -915,7 +923,6 @@ class GrowthApp(tk.Tk):
                 cisa_with = [0.0] * len(labels)
                 cisa_inv = [0.0] * len(labels)
 
-            # Cash (non-ISA)
             cash_on = self.cash_enabled.get()
             if cash_on:
                 cash_initial = parse_float_money(self.cash_initial_entry, "Cash initial")
@@ -1036,12 +1043,8 @@ class GrowthApp(tk.Tk):
             messagebox.showerror("Monte Carlo setup error", str(e))
 
     def _snapshot_params_for_mc(self) -> dict:
-        start_str = self.start_entry.get().strip() or date.today().isoformat()
-
-        _ = parse_date_iso(self.start_entry, "Start date")
         _ = parse_dob(self.dob_entry, "Date of birth")
         _ = parse_int(self.ret_age_entry, "Retirement age")
-
         _ = parse_rate(self.ssisa_rate_entry, "S&S ISA annual return")
         _ = parse_rate(self.cisa_rate_entry, "Cash ISA annual rate")
         _ = parse_rate(self.cash_rate_entry, "Cash annual rate")
@@ -1052,7 +1055,6 @@ class GrowthApp(tk.Tk):
             "ret_age": int(self.ret_age_entry.get().strip() or "60"),
             "years": int(self.years_entry.get().strip() or "0"),
             "extra_months": int(self.months_entry.get().strip() or "0"),
-            "start_str": start_str,
 
             "ssisa_on": bool(self.ssisa_enabled.get()),
             "cisa_on": bool(self.cisa_enabled.get()),
