@@ -11,12 +11,18 @@ from matplotlib.figure import Figure
 import matplotlib.dates as mdates
 
 
+# ============================
+# Files
+# ============================
 DATA_FILE = Path(__file__).with_name("mwrr_cashflows.json")
 
+BACKUP_DIR = Path(__file__).with_name("mwrr_backups")
+BACKUP_DIR.mkdir(exist_ok=True)
 
-# ----------------------------
-# Finance maths
-# ----------------------------
+
+# ============================
+# Finance maths (XIRR / MWRR)
+# ============================
 def _year_frac(d0: datetime, d1: datetime) -> float:
     return (d1 - d0).days / 365.0
 
@@ -59,7 +65,6 @@ def xirr(dates, cfs, guess=0.1) -> float:
         f_high = xnpv(high, dates, cfs)
         expand_tries += 1
 
-    # fallback: guarded Newton if bracketing failed
     if f_low * f_high > 0:
         r = guess
         for _ in range(120):
@@ -75,7 +80,6 @@ def xirr(dates, cfs, guess=0.1) -> float:
                 return r
         raise ValueError("Could not find a stable XIRR solution (check cash flows).")
 
-    # bisection -> Newton polish
     a, b = low, high
     fa, fb = f_low, f_high
     for _ in range(90):
@@ -106,9 +110,9 @@ def xirr(dates, cfs, guess=0.1) -> float:
     return r
 
 
-# ----------------------------
-# Parsing
-# ----------------------------
+# ============================
+# Parsing / formatting
+# ============================
 def parse_date(s: str) -> datetime:
     s = s.strip()
     for fmt in ("%d-%b-%y", "%d-%m-%Y", "%Y-%m-%d", "%d/%m/%Y"):
@@ -131,16 +135,17 @@ def normalise_display_date(d: datetime) -> str:
     return d.strftime("%d-%b-%y").lstrip("0")
 
 
-# ----------------------------
+# ============================
 # App
-# ----------------------------
+# ============================
 class MWRRApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("MWRR (XIRR) Tracker")
-        self.geometry("1120x650")
+        self.geometry("1200x700")
 
         self._edit_widget = None
+        self.history = []  # {"asat": "12-Feb-26", "balance": "3622.00", "mwrr": 0.1088}
 
         # ---------------- Top row ----------------
         top = ttk.Frame(self, padding=10)
@@ -188,7 +193,6 @@ class MWRRApp(tk.Tk):
         table_frame.grid_rowconfigure(0, weight=1)
         table_frame.grid_columnconfigure(0, weight=1)
 
-        # In-place edit bindings
         self.tree.bind("<Double-1>", self.on_tree_double_click)
         self.tree.bind("<Button-1>", self.on_tree_single_click)
 
@@ -209,13 +213,13 @@ class MWRRApp(tk.Tk):
 
         tip = ttk.Label(
             left,
-            text="Notes: deposits are negative (money in). Withdrawals are positive. The balance is appended automatically as a final positive cash flow on the As at date.",
+            text="Deposits are negative (money in). Withdrawals are positive. The balance is appended automatically as a final positive cash flow on the As at date.",
             foreground="#444",
             wraplength=520
         )
         tip.pack(side=tk.TOP, fill=tk.X, pady=(6, 0))
 
-        # ---------------- Metrics + history + chart (right) ----------------
+        # ---------------- Metrics + history + graphs (right) ----------------
         metrics_frame = ttk.LabelFrame(right, text="Key metrics", padding=10)
         metrics_frame.pack(side=tk.TOP, fill=tk.X)
 
@@ -229,10 +233,8 @@ class MWRRApp(tk.Tk):
         ttk.Label(metrics_frame, textvariable=self.total_withdrawals_var).grid(row=2, column=0, sticky="w", pady=(2, 0))
         ttk.Label(metrics_frame, textvariable=self.profit_var, font=("Segoe UI", 10, "bold")).grid(row=3, column=0, sticky="w", pady=(6, 0))
 
-        history_frame = ttk.LabelFrame(right, text="MWRR history (saved snapshots)", padding=10)
+        history_frame = ttk.LabelFrame(right, text="Snapshots (saved history)", padding=10)
         history_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=(10, 0))
-
-        self.history = []  # list of dicts: {"asat": "12-Feb-26", "balance": "3622", "mwrr": 0.1088}
 
         self.hist_tree = ttk.Treeview(history_frame, columns=("asat", "balance", "mwrr"), show="headings", height=7)
         self.hist_tree.heading("asat", text="As at")
@@ -254,17 +256,38 @@ class MWRRApp(tk.Tk):
         hist_buttons.grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
         ttk.Button(hist_buttons, text="Delete snapshot", command=self.on_delete_snapshot).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(hist_buttons, text="Clear all snapshots", command=self.on_clear_snapshots).pack(side=tk.LEFT)
+        ttk.Button(hist_buttons, text="Restore last backup", command=self.restore_latest_backup).pack(side=tk.LEFT, padx=(8, 0))
 
-        chart_frame = ttk.LabelFrame(right, text="MWRR chart", padding=10)
-        chart_frame.pack(side=tk.BOTTOM, fill=tk.BOTH, expand=True, pady=(10, 0))
+        # ---------------- Graphs box with tabs ----------------
+        graphs_frame = ttk.LabelFrame(right, text="Graphs", padding=10)
+        graphs_frame.pack(side=tk.BOTTOM, fill=tk.BOTH, expand=True, pady=(10, 0))
 
-        self.fig = Figure(figsize=(6, 3), dpi=100)
-        self.ax = self.fig.add_subplot(111)
-        self.ax.set_ylabel("MWRR (p.a.)")
-        self.ax.set_xlabel("Date")
+        self.graph_tabs = ttk.Notebook(graphs_frame)
+        self.graph_tabs.pack(fill=tk.BOTH, expand=True)
 
-        self.canvas = FigureCanvasTkAgg(self.fig, master=chart_frame)
-        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        # Tab 1: MWRR over time
+        tab_mwrr = ttk.Frame(self.graph_tabs)
+        self.graph_tabs.add(tab_mwrr, text="MWRR over time")
+
+        self.fig_mwrr = Figure(figsize=(6, 3), dpi=100)
+        self.ax_mwrr = self.fig_mwrr.add_subplot(111)
+        self.ax_mwrr.set_ylabel("MWRR (p.a.)")
+        self.ax_mwrr.set_xlabel("Date")
+
+        self.canvas_mwrr = FigureCanvasTkAgg(self.fig_mwrr, master=tab_mwrr)
+        self.canvas_mwrr.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        # Tab 2: Balance vs Invested baseline
+        tab_balance = ttk.Frame(self.graph_tabs)
+        self.graph_tabs.add(tab_balance, text="Balance vs invested")
+
+        self.fig_bal = Figure(figsize=(6, 3), dpi=100)
+        self.ax_bal = self.fig_bal.add_subplot(111)
+        self.ax_bal.set_ylabel("£")
+        self.ax_bal.set_xlabel("Date")
+
+        self.canvas_bal = FigureCanvasTkAgg(self.fig_bal, master=tab_balance)
+        self.canvas_bal.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
         # Close handler
         self.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -276,9 +299,41 @@ class MWRRApp(tk.Tk):
 
         self.refresh_metrics()
         self.refresh_history_view()
-        self.refresh_chart()
+        self.refresh_charts()
 
-    # ---------------- Persistence ----------------
+    # ============================
+    # Backups / restore
+    # ============================
+    def make_backup(self):
+        try:
+            if not DATA_FILE.exists():
+                self.save_data()
+            stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+            backup_file = BACKUP_DIR / f"mwrr_cashflows.backup_{stamp}.json"
+            backup_file.write_text(DATA_FILE.read_text(encoding="utf-8"), encoding="utf-8")
+        except Exception as e:
+            messagebox.showerror("Backup failed", str(e))
+
+    def restore_latest_backup(self):
+        backups = sorted(BACKUP_DIR.glob("mwrr_cashflows.backup_*.json"))
+        if not backups:
+            messagebox.showinfo("No backups", "No backup files found.")
+            return
+
+        latest = backups[-1]
+        try:
+            DATA_FILE.write_text(latest.read_text(encoding="utf-8"), encoding="utf-8")
+            self.load_data()
+            self.refresh_metrics()
+            self.refresh_history_view()
+            self.refresh_charts()
+            messagebox.showinfo("Restored", f"Restored from:\n{latest.name}")
+        except Exception as e:
+            messagebox.showerror("Restore failed", str(e))
+
+    # ============================
+    # Persistence
+    # ============================
     def get_cashflow_rows_raw(self):
         rows = []
         for iid in self.tree.get_children():
@@ -322,7 +377,9 @@ class MWRRApp(tk.Tk):
             messagebox.showerror("Load failed", f"Could not load:\n{DATA_FILE}\n\n{e}")
             return False
 
-    # ---------------- Defaults ----------------
+    # ============================
+    # Defaults
+    # ============================
     def load_preload(self):
         preload = [
             ("1-Mar-24", "-200.00"),
@@ -351,9 +408,10 @@ class MWRRApp(tk.Tk):
         ]
         self.set_cashflow_rows_raw(preload)
 
-    # ---------------- Editing in Treeview ----------------
+    # ============================
+    # Editing in Treeview
+    # ============================
     def on_tree_single_click(self, _event):
-        # If an edit widget exists, commit it
         self._commit_edit()
 
     def on_tree_double_click(self, event):
@@ -364,7 +422,7 @@ class MWRRApp(tk.Tk):
             return
 
         row_id = self.tree.identify_row(event.y)
-        col_id = self.tree.identify_column(event.x)  # e.g. "#1"
+        col_id = self.tree.identify_column(event.x)
         if not row_id or not col_id:
             return
 
@@ -378,16 +436,10 @@ class MWRRApp(tk.Tk):
         entry.insert(0, value)
         entry.select_range(0, tk.END)
         entry.focus()
-
         entry.place(x=x, y=y, width=width, height=height)
 
-        def on_return(_e):
-            self._commit_edit()
-        def on_escape(_e):
-            self._cancel_edit()
-
-        entry.bind("<Return>", on_return)
-        entry.bind("<Escape>", on_escape)
+        entry.bind("<Return>", lambda _e: self._commit_edit())
+        entry.bind("<Escape>", lambda _e: self._cancel_edit())
         entry.bind("<FocusOut>", lambda _e: self._commit_edit())
 
         self._edit_widget = (entry, row_id, col_key)
@@ -407,7 +459,6 @@ class MWRRApp(tk.Tk):
         entry.destroy()
         self._edit_widget = None
 
-        # Validate
         try:
             if col_key == "date":
                 d = parse_date(new_val)
@@ -423,7 +474,9 @@ class MWRRApp(tk.Tk):
         self.save_data()
         self.refresh_metrics()
 
-    # ---------------- Actions ----------------
+    # ============================
+    # Actions
+    # ============================
     def on_add_row(self):
         try:
             d = parse_date(self.new_date_var.get())
@@ -457,7 +510,6 @@ class MWRRApp(tk.Tk):
             messagebox.showerror("Invalid inputs", str(e))
             return
 
-        # read & validate cash flows
         rows = []
         for iid in self.tree.get_children():
             d_str, a_str = self.tree.item(iid, "values")
@@ -473,7 +525,6 @@ class MWRRApp(tk.Tk):
             messagebox.showerror("No data", "Add at least one cash flow row.")
             return
 
-        # append final balance
         rows.append((asat, bal))
         rows.sort(key=lambda x: x[0])
 
@@ -488,7 +539,6 @@ class MWRRApp(tk.Tk):
 
         self.mwrr_var.set(f"MWRR: {r*100:.2f}% p.a.")
 
-        # save snapshot (overwrite same date snapshot if already exists)
         asat_disp = normalise_display_date(asat)
         snapshot = {"asat": asat_disp, "balance": f"{bal:.2f}", "mwrr": r}
 
@@ -501,15 +551,16 @@ class MWRRApp(tk.Tk):
         if not replaced:
             self.history.append(snapshot)
 
-        # keep history sorted by date
         self.history.sort(key=lambda s: parse_date(s["asat"]))
 
         self.save_data()
         self.refresh_metrics()
         self.refresh_history_view()
-        self.refresh_chart()
+        self.refresh_charts()
 
-    # ---------------- Metrics / History / Chart ----------------
+    # ============================
+    # Metrics / History / Charts
+    # ============================
     def refresh_metrics(self):
         self._commit_edit()
 
@@ -517,7 +568,7 @@ class MWRRApp(tk.Tk):
         withdrawals = 0.0
 
         for iid in self.tree.get_children():
-            d_str, a_str = self.tree.item(iid, "values")
+            _d_str, a_str = self.tree.item(iid, "values")
             try:
                 a = parse_money(a_str)
             except Exception:
@@ -535,8 +586,6 @@ class MWRRApp(tk.Tk):
         except Exception:
             bal = None
 
-        # Profit vs cash flows:
-        # Final value + withdrawals - deposits
         if bal is not None:
             profit = bal + withdrawals - deposits
             self.profit_var.set(f"Profit (balance + withdrawals − deposits): {fmt_money(profit)}")
@@ -545,8 +594,7 @@ class MWRRApp(tk.Tk):
 
         self.total_deposits_var.set(f"Total deposits: {fmt_money(deposits)}")
         self.total_withdrawals_var.set(f"Total withdrawals: {fmt_money(withdrawals)}")
-        self.net_de = f"{fmt_money(net_deposits)}"
-        self.net_deposits_var.set(f"Net deposits (deposits − withdrawals): {self.net_de}")
+        self.net_deposits_var.set(f"Net deposits (deposits − withdrawals): {fmt_money(net_deposits)}")
 
     def refresh_history_view(self):
         for iid in self.hist_tree.get_children():
@@ -557,21 +605,28 @@ class MWRRApp(tk.Tk):
             bal = s.get("balance", "")
             mwrr = s.get("mwrr", None)
             mwrr_txt = f"{mwrr*100:.2f}%" if isinstance(mwrr, (int, float)) else ""
-            self.hist_tree.insert("", "end", values=(asat, fmt_money(float(bal)) if bal else "", mwrr_txt))
+            bal_txt = fmt_money(float(bal)) if bal else ""
+            self.hist_tree.insert("", "end", values=(asat, bal_txt, mwrr_txt))
 
-    def refresh_chart(self):
-        self.ax.clear()
-        self.ax.set_ylabel("MWRR (p.a.)")
-        self.ax.set_xlabel("Date")
+    def refresh_charts(self):
+        self._refresh_mwrr_chart()
+        self._refresh_balance_vs_invested_chart()
+
+    def _refresh_mwrr_chart(self):
+        self.ax_mwrr.clear()
+        self.ax_mwrr.set_ylabel("MWRR (p.a.)")
+        self.ax_mwrr.set_xlabel("Date")
 
         if not self.history:
-            self.ax.text(0.5, 0.5, "No snapshots yet.\nClick 'Calculate + Save Snapshot' to add points.",
-                         ha="center", va="center", transform=self.ax.transAxes)
-            self.canvas.draw()
+            self.ax_mwrr.text(
+                0.5, 0.5,
+                "No snapshots yet.\nClick 'Calculate + Save Snapshot' to add points.",
+                ha="center", va="center", transform=self.ax_mwrr.transAxes
+            )
+            self.canvas_mwrr.draw()
             return
 
-        xs = []
-        ys = []
+        xs, ys = [], []
         for s in self.history:
             try:
                 xs.append(parse_date(s["asat"]))
@@ -580,35 +635,127 @@ class MWRRApp(tk.Tk):
                 pass
 
         if xs and ys:
-            self.ax.plot(xs, ys, marker="o", linewidth=1.5)
+            self.ax_mwrr.plot(xs, ys, marker="o", linewidth=1.5)
+            self.ax_mwrr.xaxis.set_major_locator(mdates.AutoDateLocator())
+            self.ax_mwrr.xaxis.set_major_formatter(mdates.DateFormatter("%b-%y"))
+            self.fig_mwrr.autofmt_xdate()
 
-            self.ax.xaxis.set_major_locator(mdates.AutoDateLocator())
-            self.ax.xaxis.set_major_formatter(mdates.DateFormatter("%b-%y"))
-            self.fig.autofmt_xdate()
+        self.canvas_mwrr.draw()
 
-        self.canvas.draw()
+    def _refresh_balance_vs_invested_chart(self):
+        self.ax_bal.clear()
+        self.ax_bal.set_ylabel("£")
+        self.ax_bal.set_xlabel("Date")
 
+        # Need at least 1 snapshot for a balance line
+        if not self.history:
+            self.ax_bal.text(
+                0.5, 0.5,
+                "No snapshots yet.\nClick 'Calculate + Save Snapshot' to record balances over time.",
+                ha="center", va="center", transform=self.ax_bal.transAxes
+            )
+            self.canvas_bal.draw()
+            return
+
+        # Sort snapshots
+        hist = sorted(self.history, key=lambda s: parse_date(s["asat"]))
+
+        # Pre-parse cashflows for invested baseline calculation
+        cashflows = []
+        for iid in self.tree.get_children():
+            d_str, a_str = self.tree.item(iid, "values")
+            try:
+                d = parse_date(d_str)
+                a = parse_money(a_str)
+                cashflows.append((d, a))
+            except Exception:
+                continue
+        cashflows.sort(key=lambda x: x[0])
+
+        def invested_up_to(target_date: datetime) -> float:
+            """
+            'Invested baseline' = net deposits up to that date (deposits - withdrawals),
+            where deposits are negative cashflows and withdrawals are positive cashflows.
+            Returns a positive £ amount.
+            """
+            deposits = 0.0
+            withdrawals = 0.0
+            for d, a in cashflows:
+                if d <= target_date:
+                    if a < 0:
+                        deposits += -a
+                    elif a > 0:
+                        withdrawals += a
+            return deposits - withdrawals
+
+        xs = []
+        balance_line = []
+        invested_line = []
+
+        for s in hist:
+            try:
+                d = parse_date(s["asat"])
+                b = float(s["balance"])
+            except Exception:
+                continue
+            xs.append(d)
+            balance_line.append(b)
+            invested_line.append(invested_up_to(d))
+
+        if not xs:
+            self.ax_bal.text(
+                0.5, 0.5,
+                "No valid snapshot balances to plot.",
+                ha="center", va="center", transform=self.ax_bal.transAxes
+            )
+            self.canvas_bal.draw()
+            return
+
+        self.ax_bal.plot(xs, balance_line, marker="o", linewidth=1.5, label="Balance")
+        self.ax_bal.plot(xs, invested_line, linewidth=1.5, linestyle="--", label="Net deposits (invested baseline)")
+
+        self.ax_bal.xaxis.set_major_locator(mdates.AutoDateLocator())
+        self.ax_bal.xaxis.set_major_formatter(mdates.DateFormatter("%b-%y"))
+        self.fig_bal.autofmt_xdate()
+
+        self.ax_bal.legend(loc="best")
+        self.canvas_bal.draw()
+
+    # ============================
+    # Snapshot actions (with backup)
+    # ============================
     def on_delete_snapshot(self):
         sel = self.hist_tree.selection()
         if not sel:
             return
-        # delete by asat label
+
+        self.make_backup()
+
         for iid in sel:
             asat = self.hist_tree.item(iid, "values")[0]
             self.history = [s for s in self.history if s.get("asat") != asat]
+
         self.save_data()
         self.refresh_history_view()
-        self.refresh_chart()
+        self.refresh_charts()
 
     def on_clear_snapshots(self):
         if not self.history:
             return
-        if messagebox.askyesno("Clear all snapshots", "Delete all saved MWRR snapshots?"):
+
+        if messagebox.askyesno(
+            "Clear all snapshots",
+            "Delete all saved snapshots?\n\nYou can restore the latest backup afterwards."
+        ):
+            self.make_backup()
             self.history = []
             self.save_data()
             self.refresh_history_view()
-            self.refresh_chart()
+            self.refresh_charts()
 
+    # ============================
+    # Close
+    # ============================
     def on_close(self):
         self._commit_edit()
         self.save_data()
